@@ -76,7 +76,6 @@ class DependencyGraphBuilder:
     def _build_from_packages_format(self) -> None:
         packages = self.lockfile.get("packages", {})
         root_info = packages.get("", {})
-
         root_name = root_info.get("name", "root-project")
         root_version = root_info.get("version", "0.0.0")
         self.root_id = make_node_id(root_name, root_version)
@@ -110,8 +109,8 @@ class DependencyGraphBuilder:
             )
 
         root_deps = root_info.get("dependencies", {})
-        for dep_name in root_deps.keys():
-            child_id = self._find_best_match_for_root_dependency(dep_name, packages)
+        for dep_name, dep_spec in root_deps.items():
+            child_id = self._find_best_match_for_root_dependency(dep_name, dep_spec, packages)
             if child_id:
                 self._add_edge(self.root_id, child_id)
 
@@ -132,23 +131,59 @@ class DependencyGraphBuilder:
     def _find_best_match_for_root_dependency(
         self,
         dep_name: str,
+        dep_spec: str,
         packages: Dict[str, Any]
     ) -> Optional[str]:
-        direct_path = f"node_modules/{dep_name}"
-        info = packages.get(direct_path)
+        direct_path = f"node_modules/{dep_name}" # 1단계: 직접 경로로 바로 찾기
 
+        info = packages.get(direct_path)
         if info:
             name = info.get("name") or extract_name_from_path(direct_path)
             version = info.get("version")
             return make_node_id(name, version)
 
-        for path, info in packages.items():
-            if path.endswith(f"node_modules/{dep_name}"):
-                name = info.get("name") or extract_name_from_path(path)
-                version = info.get("version")
-                return make_node_id(name, version)
+        suffix = f"node_modules/{dep_name}"
+        candidates = []
 
-        return None
+        for path, info in packages.items(): # 2단계: endswith로 후보 전부 수집
+            if path.endswith(suffix):
+                version = info.get("version")
+                depth = path.count("node_modules")
+                candidates.append((path, info, version, depth))
+
+        if not candidates:
+            return None
+
+        matched = [ # 3단계: 버전 조건 맞는 것만 필터
+            (path, info, version, depth)
+            for path, info, version, depth in candidates
+            if self._version_matches(dep_spec, version)
+        ]
+
+        pool = matched if matched else candidates # 4단계: 버전 맞는 게 없으면 전체 후보 사용
+        pool.sort(key=lambda x: (x[3], x[0])) # 5단계: depth 기준 정렬 후 첫 번째 반환
+        best_path, best_info, _, _ = pool[0]
+
+        name = best_info.get("name") or extract_name_from_path(best_path)
+        version = best_info.get("version")
+        return make_node_id(name, version)
+        #버전 조건 비교하는 함수
+    def _version_matches(self, dep_spec: str, actual_version: Optional[str]) -> bool:
+        if not dep_spec or not actual_version:
+            return False
+
+        dep_spec = dep_spec.strip()
+        actual_version = actual_version.strip()
+
+        if dep_spec == actual_version:
+            return True
+
+        for prefix in ["^", "~", ">=", "<=", ">", "<", "="]:
+            if dep_spec.startswith(prefix):
+                dep_spec = dep_spec[len(prefix):].strip()
+                break
+
+        return dep_spec == actual_version
 
     def _find_best_child_for_package(
         self,
