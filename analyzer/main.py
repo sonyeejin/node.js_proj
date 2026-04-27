@@ -9,6 +9,7 @@ from detectors.dependency_confusion_detector import detect_dependency_confusion
 from detectors.ast_detector import detect_ast_risks
 from detectors.dynamic_analyzer import detect_dynamic_risks
 from comparator import compare
+from dashboard import generate_dashboard
 
 
 # ─── 출력 저장 ────────────────────────────────────────────────────────────────
@@ -311,6 +312,9 @@ def main() -> None:
     save_output(graph, graph_output_path)
     save_output(detection_results, detection_output_path)
     save_output(comparison_results, comparison_output_path)
+
+    # ── 대시보드 생성 ────────────────────────────────────────────────────
+    generate_dashboard(detection_results, comparison_results, graph, project_dir)
 
     print(f"\n  상세 결과 저장 완료")
     print(f"  - {detection_output_path}")
