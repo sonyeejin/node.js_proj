@@ -247,6 +247,20 @@ def _assess_risk(
     if has_install_script and dynamic_has_network:
         reasons.append("install script 실행 중 네트워크 요청 탐지")
 
+    # 조건 5: eval + process_execution 조합
+    # obfuscation 단독은 제외 — 정상 패키지도 Buffer.from 씀
+    # eval이 실제로 있어야 의심
+    static_has_eval = any(
+        f.get("type") == "dynamic_execution" and f.get("subtype") == "eval"
+        for f in static_findings
+    )
+    if static_has_eval and dynamic_has_process:
+        reasons.append("eval 기반 동적 실행 + 실제 프로세스 실행 탐지 (eval 악성 코드 의심)")
+    # 조건 6: install script 있는 패키지에서 env_access 발생
+    # → 설치 중 환경변수 수집 의심 (ua-parser-js 유형, network 차단 환경 대응)
+    if has_install_script and dynamic_has_env:
+        reasons.append("install script 실행 중 환경 변수 접근 탐지 (정보 수집 의심)")
+
     if reasons:
         return "HIGH", reasons
 
