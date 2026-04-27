@@ -52,11 +52,54 @@ function shouldExcludePath(fullPath) {
 }
 
 // ─── 파일 수집 ────────────────────────────────────────────────────────────────
-// [성능 개선] 재귀 대신 스택 기반 반복 탐색 → 콜스택 깊이 제한 방지
+// package.json 기준으로 패키지 디렉토리를 먼저 수집한 뒤
+// 각 패키지 내부의 JS 파일만 탐색 → 3단계 동적 분석과 분석 대상 통일
 
-function collectJsFiles(projectDir) {
+function collectPackageDirs(nodeModulesDir) {
+  // package.json이 존재하는 패키지 디렉토리 목록 반환
+  // scoped 패키지(@scope/name)도 처리
+  const packages = [];
+
+  let entries;
+  try {
+    entries = fs.readdirSync(nodeModulesDir, { withFileTypes: true });
+  } catch (_) {
+    return packages;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const fullPath = path.join(nodeModulesDir, entry.name);
+
+    if (entry.name.startsWith("@")) {
+      // scoped 패키지: @scope/name 형태
+      let scopedEntries;
+      try {
+        scopedEntries = fs.readdirSync(fullPath, { withFileTypes: true });
+      } catch (_) {
+        continue;
+      }
+      for (const scoped of scopedEntries) {
+        if (!scoped.isDirectory()) continue;
+        const scopedPath = path.join(fullPath, scoped.name);
+        if (fs.existsSync(path.join(scopedPath, "package.json"))) {
+          packages.push(scopedPath);
+        }
+      }
+    } else {
+      if (fs.existsSync(path.join(fullPath, "package.json"))) {
+        packages.push(fullPath);
+      }
+    }
+  }
+
+  return packages;
+}
+
+function collectJsFilesInPackage(packageDir) {
+  // 단일 패키지 디렉토리 내 JS 파일만 수집
   const results = [];
-  const stack = [projectDir];
+  const stack = [packageDir];
 
   while (stack.length > 0) {
     const dir = stack.pop();
@@ -65,7 +108,7 @@ function collectJsFiles(projectDir) {
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch (_) {
-      continue; // 권한 없는 디렉토리 스킵
+      continue;
     }
 
     for (const entry of entries) {
@@ -74,11 +117,12 @@ function collectJsFiles(projectDir) {
       if (entry.isDirectory()) {
         if (EXCLUDED_DIR_NAMES.has(entry.name)) continue;
         if (shouldExcludePath(fullPath)) continue;
+        // 패키지 내부의 중첩 node_modules는 별도 패키지이므로 스킵
+        if (entry.name === "node_modules") continue;
         stack.push(fullPath);
       } else if (entry.isFile()) {
         const ext = path.extname(entry.name);
         if (!JS_EXTENSIONS.has(ext)) continue;
-        if (!fullPath.split(path.sep).includes("node_modules")) continue;
         if (shouldExcludePath(fullPath)) continue;
         results.push(fullPath);
       }
@@ -498,22 +542,37 @@ function analyzeFile(filePath) {
 // ─── 프로젝트 전체 분석 ───────────────────────────────────────────────────────
 
 function analyzeProject(projectDir) {
-  const files = collectJsFiles(projectDir);
+  const nodeModulesDir = path.join(projectDir, "node_modules");
+  const packageDirs = collectPackageDirs(nodeModulesDir);
   const packageMap = new Map();
 
-  for (const filePath of files) {
-    const result = analyzeFile(filePath);
-    const packageInfo = result.packageInfo;
-    if (!packageInfo) continue;
-
-    const key = `${packageInfo.package}@${packageInfo.version}`;
-    if (!packageMap.has(key)) {
-      packageMap.set(key, { package: packageInfo.package, version: packageInfo.version, findings: [], parse_errors: [] });
+  for (const packageDir of packageDirs) {
+    // package.json에서 패키지 이름/버전 미리 읽기
+    let pkgName, pkgVersion;
+    try {
+      const pkgJson = JSON.parse(fs.readFileSync(path.join(packageDir, "package.json"), "utf8"));
+      pkgName = pkgJson.name || path.basename(packageDir);
+      pkgVersion = pkgJson.version || "unknown";
+    } catch (_) {
+      pkgName = path.basename(packageDir);
+      pkgVersion = "unknown";
     }
 
-    const pkgResult = packageMap.get(key);
-    pkgResult.findings.push(...result.findings);
-    pkgResult.parse_errors.push(...result.parse_errors);
+    const key = `${pkgName}@${pkgVersion}`;
+    if (!packageMap.has(key)) {
+      packageMap.set(key, { package: pkgName, version: pkgVersion, findings: [], parse_errors: [] });
+    }
+
+    // JS 파일이 없는 패키지도 결과에 포함 (동적 분석과 모수 통일)
+    const jsFiles = collectJsFilesInPackage(packageDir);
+    for (const filePath of jsFiles) {
+      const result = analyzeFile(filePath);
+      if (!result.packageInfo) continue;
+
+      const pkgResult = packageMap.get(key);
+      pkgResult.findings.push(...result.findings);
+      pkgResult.parse_errors.push(...result.parse_errors);
+    }
   }
 
   const finalResults = [];
