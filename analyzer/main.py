@@ -44,7 +44,8 @@ def print_step1(
     confusion_results: list
 ) -> None:
     header("1단계 · 메타데이터 분석")
-    info(f"패키지 수  : {len(graph['nodes'])}개  |  의존성 엣지 : {len(graph['edges'])}개")
+    pkg_count = len([n for n in graph['nodes'].values() if n.get('path', '') != ''])
+    info(f"패키지 수  : {pkg_count}개  |  의존성 엣지 : {len(graph['edges'])}개")
     print()
 
     if not install_results and not typo_results and not confusion_results:
