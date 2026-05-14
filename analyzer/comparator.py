@@ -2,29 +2,11 @@
 comparator.py
 
 정적 분석(AST) 결과와 동적 분석 결과를 비교하여
-'정적에서만 탐지', '동적에서만 탐지', '둘 다 탐지' 로 분류한다.
-
-핵심 목적:
-  - 정적 분석 오탐(False Positive) 식별
-    → 정적에서 탐지됐지만 동적에서 아무 행위 없는 경우
-  - 정적 분석 미탐(False Negative) 식별
-    → 정적에서 못 잡았지만 동적에서 실제 행위가 발생한 경우
-
-위험도 판정 기준 (행위 조합 기반):
-  HIGH   - 아래 조건 중 하나 이상 충족
-           1. env_access + network 조합 (정보 수집 후 외부 전송 의심)
-           2. process_execution + network 조합 (명령 실행 후 외부 통신 의심)
-           3. filesystem write/delete 발생 (파일 조작)
-           4. install script 실행 중 network 발생
-  MEDIUM - HIGH 조건 없이 정적 또는 동적 탐지만 있는 경우
-  LOW    - 탐지 없음
-  UNKNOWN- 동적 분석 실패
+위험도를 판정한다.
 """
 
 from typing import Any, Dict, List
 
-
-# ─── 정적 finding 타입 → 동적 카테고리 매핑 ──────────────────────────────────
 
 STATIC_TO_DYNAMIC_CATEGORY = {
     "external_communication":   "network",
@@ -34,31 +16,22 @@ STATIC_TO_DYNAMIC_CATEGORY = {
     "obfuscation":              None,
 }
 
-# 파일 시스템 write/delete 액션 (read는 모듈 로드 시 정상 발생)
 DANGEROUS_FS_ACTIONS = {"write", "append", "delete", "mkdir", "copy"}
 
+# 알려진 정상 빌드 도구 명령어
+SAFE_COMMAND_PATTERNS = {
+    "node-gyp", "node-pre-gyp", "prebuild-install",
+    "husky", "napi-postinstall", "npx", "npm run", "node install"
+}
 
-# ─── 핵심 비교 함수 ───────────────────────────────────────────────────────────
 
 def compare(
     static_results:  List[Dict[str, Any]],
     dynamic_results: List[Dict[str, Any]],
     install_script_results: List[Dict[str, Any]] = []
 ) -> List[Dict[str, Any]]:
-    """
-    정적 분석 결과와 동적 분석 결과를 패키지 단위로 비교한다.
 
-    Args:
-        static_results:         AST 정적 분석 결과 리스트
-        dynamic_results:        동적 분석 결과 리스트
-        install_script_results: 1단계 install script 탐지 결과
-
-    Returns:
-        패키지별 비교 결과 리스트
-    """
     dynamic_map = _build_dynamic_map(dynamic_results)
-
-    # install script가 있는 패키지 이름 집합
     install_script_pkgs = {r.get("package") for r in install_script_results}
 
     comparison_results = []
@@ -71,19 +44,17 @@ def compare(
         dynamic_pkg = dynamic_map.get(package_name, _empty_dynamic_result(package_name))
 
         result = _compare_package(
-            package_name          = package_name,
-            version               = version,
-            static_findings       = static_findings,
-            dynamic_pkg           = dynamic_pkg,
-            has_install_script    = package_name in install_script_pkgs
+            package_name       = package_name,
+            version            = version,
+            static_findings    = static_findings,
+            dynamic_pkg        = dynamic_pkg,
+            has_install_script = package_name in install_script_pkgs
         )
 
         comparison_results.append(result)
 
     return comparison_results
 
-
-# ─── 패키지 단위 비교 ─────────────────────────────────────────────────────────
 
 def _compare_package(
     package_name:       str,
@@ -93,21 +64,28 @@ def _compare_package(
     has_install_script: bool = False
 ) -> Dict[str, Any]:
 
-    dynamic_network   = dynamic_pkg.get("network", [])
-    dynamic_process   = dynamic_pkg.get("process_execution", [])
-    dynamic_env       = dynamic_pkg.get("env_access", [])
-    dynamic_fs        = dynamic_pkg.get("filesystem", [])
+    dynamic_network = dynamic_pkg.get("network", [])
+    dynamic_process = dynamic_pkg.get("process_execution", [])
+    dynamic_env     = dynamic_pkg.get("env_access", [])
+    dynamic_fs      = dynamic_pkg.get("filesystem", [])
 
-    dynamic_has_network   = len(dynamic_network) > 0
-    dynamic_has_process   = len(dynamic_process) > 0
-    dynamic_has_env       = len(dynamic_env) > 0
-    dynamic_has_fs        = len(dynamic_fs) > 0
-    dynamic_has_any       = dynamic_has_network or dynamic_has_process or dynamic_has_env or dynamic_has_fs
+    # 동적 분석 결과만 기준
+    dynamic_has_network = len(dynamic_network) > 0
+    dynamic_has_process = len(dynamic_process) > 0
+    dynamic_has_env     = len(dynamic_env) > 0
+    dynamic_has_fs      = len(dynamic_fs) > 0
+    dynamic_has_any     = dynamic_has_network or dynamic_has_process or dynamic_has_env or dynamic_has_fs
 
-    # 파일 시스템 접근 중 위험 액션(write/delete 등)만 필터링
     dangerous_fs = [f for f in dynamic_fs if f.get("action") in DANGEROUS_FS_ACTIONS]
 
-    # ── 정적 finding 분류 ─────────────────────────────────────────────────────
+    # 프로세스 명령어 목록
+    process_commands = {e.get("command", "") for e in dynamic_process}
+    is_only_safe = bool(process_commands) and all(
+        any(p in c.lower() for p in SAFE_COMMAND_PATTERNS)
+        for c in process_commands
+        )
+
+    # 정적 finding 분류
     static_only   = []
     both_detected = []
 
@@ -128,7 +106,7 @@ def _compare_package(
         else:
             static_only.append(finding)
 
-    # ── 동적에서만 탐지된 항목 ───────────────────────────────────────────────
+    # 동적에서만 탐지된 항목
     static_types_detected = set(f.get("type") for f in static_findings)
     dynamic_only = []
 
@@ -160,25 +138,25 @@ def _compare_package(
             "description": "실행 시 파일 쓰기/삭제 등 파일 시스템 조작 발생"
         })
 
-    # ── 위험도 판정 ───────────────────────────────────────────────────────────
     risk_level, risk_reasons = _assess_risk(
-        dynamic_has_network   = dynamic_has_network,
-        dynamic_has_process   = dynamic_has_process,
-        dynamic_has_env       = dynamic_has_env,
-        dangerous_fs          = dangerous_fs,
-        has_install_script    = has_install_script,
-        both_detected         = both_detected,
-        dynamic_only          = dynamic_only,
-        static_findings       = static_findings,
-        dynamic_errors        = dynamic_pkg.get("errors", []),
-        analysis_timeout      = dynamic_pkg.get("metadata", {}).get("analysis_timeout", False)
+        dynamic_has_network = dynamic_has_network,
+        dynamic_has_process = dynamic_has_process,
+        dynamic_has_env     = dynamic_has_env,
+        dangerous_fs        = dangerous_fs,
+        has_install_script  = has_install_script,
+        is_only_safe        = is_only_safe,
+        both_detected       = both_detected,
+        dynamic_only        = dynamic_only,
+        static_findings     = static_findings,
+        dynamic_errors      = dynamic_pkg.get("errors", []),
+        analysis_timeout    = dynamic_pkg.get("metadata", {}).get("analysis_timeout", False),
     )
 
     return {
         "package":          package_name,
         "version":          version,
         "risk_level":       risk_level,
-        "risk_reasons":     risk_reasons,   # 판정 근거 목록
+        "risk_reasons":     risk_reasons,
         "both_detected":    both_detected,
         "static_only":      static_only,
         "dynamic_only":     dynamic_only,
@@ -194,29 +172,19 @@ def _compare_package(
     }
 
 
-# ─── 위험도 판정 ──────────────────────────────────────────────────────────────
-
 def _assess_risk(
-    dynamic_has_network:  bool,
-    dynamic_has_process:  bool,
-    dynamic_has_env:      bool,
-    dangerous_fs:         List,
-    has_install_script:   bool,
-    both_detected:        List,
-    dynamic_only:         List,
-    static_findings:      List,
-    dynamic_errors:       List,
-    analysis_timeout:     bool
+    dynamic_has_network: bool,
+    dynamic_has_process: bool,
+    dynamic_has_env:     bool,
+    dangerous_fs:        List,
+    has_install_script:  bool,
+    is_only_safe:        bool,
+    both_detected:       List,
+    dynamic_only:        List,
+    static_findings:     List,
+    dynamic_errors:      List,
+    analysis_timeout:    bool,
 ):
-    """
-    행위 조합 기반 위험도 판정.
-
-    단일 행위만으로는 판단하지 않고 조합으로 판단한다.
-    - env_access 단독: 정상 패키지도 흔하므로 위험으로 보지 않음
-    - process_exec 단독: 빌드 도구도 쓰므로 위험으로 보지 않음
-    - network 단독: API 호출도 있으므로 위험으로 보지 않음
-    - 조합 발생 시 위험 판정
-    """
     # 동적 분석 실패
     analysis_errors = [e for e in dynamic_errors if e.get("type") == "analysis_error"]
     if analysis_errors or analysis_timeout:
@@ -224,54 +192,45 @@ def _assess_risk(
 
     reasons = []
 
-    # ── HIGH 판정 조건 ────────────────────────────────────────────────────────
-
     # 조건 1: env_access + network 조합
-    # → 시스템 정보 수집 후 외부 전송 의심 (ua-parser-js 유형)
     if dynamic_has_env and dynamic_has_network:
         reasons.append("환경 변수 접근 + 네트워크 요청 조합 탐지 (정보 탈취 의심)")
 
     # 조건 2: process_execution + network 조합
-    # → 명령 실행 후 외부 통신 의심
     if dynamic_has_process and dynamic_has_network:
         reasons.append("프로세스 실행 + 네트워크 요청 조합 탐지 (원격 제어 의심)")
 
     # 조건 3: 파일 시스템 write/delete 발생
-    # → 파일 조작 행위 (node-ipc 유형)
     if dangerous_fs:
         actions = list(set(f.get("action") for f in dangerous_fs))
         reasons.append(f"파일 시스템 조작 탐지 ({', '.join(actions)})")
 
-    # 조건 4: install script 있는 패키지에서 network 발생
-    # → 설치 중 외부 통신 의심
+    # 조건 4: install script + network 조합
     if has_install_script and dynamic_has_network:
         reasons.append("install script 실행 중 네트워크 요청 탐지")
 
     # 조건 5: eval + process_execution 조합
-    # obfuscation 단독은 제외 — 정상 패키지도 Buffer.from 씀
-    # eval이 실제로 있어야 의심
     static_has_eval = any(
         f.get("type") == "dynamic_execution" and f.get("subtype") == "eval"
         for f in static_findings
     )
     if static_has_eval and dynamic_has_process:
         reasons.append("eval 기반 동적 실행 + 실제 프로세스 실행 탐지 (eval 악성 코드 의심)")
-    # 조건 6: install script 있는 패키지에서 env_access 발생
-    # → 설치 중 환경변수 수집 의심 (ua-parser-js 유형, network 차단 환경 대응)
-    if has_install_script and dynamic_has_env:
+
+    # 조건 6: install script + env_access 조합
+    # husky, node-gyp 등 정상 빌드 도구만 실행한 경우는 제외
+    if has_install_script and dynamic_has_env and not is_only_safe:
         reasons.append("install script 실행 중 환경 변수 접근 탐지 (정보 수집 의심)")
 
     if reasons:
         return "HIGH", reasons
 
-    # ── MEDIUM 판정 ───────────────────────────────────────────────────────────
+    # MEDIUM
     if len(both_detected) > 0 or len(dynamic_only) > 0 or len(static_findings) > 0:
         return "MEDIUM", []
 
     return "LOW", []
 
-
-# ─── 요약 생성 ────────────────────────────────────────────────────────────────
 
 def _build_summary(
     static_findings: List,
@@ -304,8 +263,6 @@ def _build_summary(
         "notes":                notes
     }
 
-
-# ─── 내부 헬퍼 ───────────────────────────────────────────────────────────────
 
 def _build_dynamic_map(dynamic_results: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     result = {}
