@@ -33,7 +33,7 @@ const OBFUSCATION_PATTERNS = new Set([
 ]);
 
 const EXCLUDED_DIR_NAMES = new Set([
-  "test", "tests", "__tests__", "coverage"
+  "test", "tests", "__tests__", "coverage", "spec", "__mocks__", "fixtures"
 ]);
 
 // [성능] 1MB 초과 파일 스킵 (번들된 대형 파일 제외)
@@ -43,11 +43,20 @@ const MAX_FILE_SIZE = 1024 * 1024;
 
 function shouldExcludePath(fullPath) {
   const normalized = fullPath.split(path.sep).join("/");
+  const fileName = path.basename(fullPath);
   return (
     normalized.includes("/test/") ||
     normalized.includes("/tests/") ||
     normalized.includes("/__tests__/") ||
-    normalized.includes("/coverage/")
+    normalized.includes("/coverage/") ||
+    normalized.includes("/spec/") ||
+    normalized.includes("/__mocks__/") ||
+    fileName.endsWith(".test.js") ||
+    fileName.endsWith(".test.ts") ||
+    fileName.endsWith(".spec.js") ||
+    fileName.endsWith(".spec.ts") ||
+    fileName.endsWith(".test.mjs") ||
+    fileName.endsWith(".spec.mjs")
   );
 }
 
